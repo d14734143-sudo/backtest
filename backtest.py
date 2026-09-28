@@ -1,8 +1,10 @@
-import json, math, statistics, urllib.request
+import json, math, urllib.request
 from datetime import datetime, timezone
 
 BASE='https://finom.github.io/static-klines/api/klines/15m/BTCUSDT'
 WEEKS=['2025-02-24','2025-03-03']
+START_MS=int(datetime(2025,2,24,0,0,tzinfo=timezone.utc).timestamp()*1000)
+END_MS=int(datetime(2025,3,7,0,0,tzinfo=timezone.utc).timestamp()*1000)  # exclusive; includes all of Mar 6 UTC
 
 
 def fetch_week(d):
@@ -10,7 +12,9 @@ def fetch_week(d):
         raw=json.load(r)
     out=[]
     for x in raw:
-        out.append({'t':int(x[0]),'o':float(x[1]),'h':float(x[2]),'l':float(x[3]),'c':float(x[4]),'v':float(x[5])})
+        t=int(x[0])
+        if START_MS <= t < END_MS:
+            out.append({'t':t,'o':float(x[1]),'h':float(x[2]),'l':float(x[3]),'c':float(x[4]),'v':float(x[5])})
     return out
 
 
@@ -71,8 +75,6 @@ def run(bars):
         if atr[i] is None: continue
 
         hi1,lo1=p1[min(i//4,len(p1)-1)]
-
-        # detect 1H liquidity sweep on current 15m bar
         sweep=None
         if hi1 and b['h']>hi1[1] and b['c']<hi1[1]: sweep=('short',b['h'])
         elif lo1 and b['l']<lo1[1] and b['c']>lo1[1]: sweep=('long',b['l'])
@@ -87,7 +89,6 @@ def run(bars):
         disp=body>=atr[i] and br>=0.70
 
         if pending['dir']=='long' and last_hi15 and b['c']>last_hi15[1] and disp and b['c']>b['o']:
-            # bullish CHoCH + displacement
             if i>=2 and bars[i-2]['h']<b['l'] and (b['l']-bars[i-2]['h'])>=0.10*atr[i]:
                 zone=(bars[i-2]['h'],b['l'])
             else:
@@ -136,6 +137,7 @@ def run(bars):
 
 bars=[]
 for w in WEEKS: bars.extend(fetch_week(w))
+bars.sort(key=lambda x:x['t'])
 trades=run(bars)
 
 def stats(key):
@@ -146,6 +148,6 @@ def stats(key):
     pf=((wins*(2 if key=='2R' else 3))/losses) if losses else (math.inf if wins else 0)
     return {'closed':len(closed),'wins':wins,'losses':losses,'win_rate_pct':round(wr,2),'expectancy_R':round(expectancy,3),'profit_factor_R':('inf' if math.isinf(pf) else round(pf,3))}
 
-result={'symbol':'BTCUSDT','period':'2025-02-24 to 2025-03-09','rules':{'pivot':'2 left / 2 right','ATR':14,'displacement_body':'>=1 ATR','body_ratio':'>=70%','FVG':'>=0.10 ATR','retest':'<=12 bars','SL':'sweep extreme +/-0.15 ATR'},'trades':trades,'stats_2R':stats('2R'),'stats_3R':stats('3R')}
+result={'symbol':'BTCUSDT','period':'2025-02-24 to 2025-03-06 UTC','bars':len(bars),'rules':{'pivot':'2 left / 2 right','ATR':14,'displacement_body':'>=1 ATR','body_ratio':'>=70%','FVG':'>=0.10 ATR','retest':'<=12 bars','SL':'sweep extreme +/-0.15 ATR'},'trades':trades,'stats_2R':stats('2R'),'stats_3R':stats('3R')}
 with open('result.json','w') as f: json.dump(result,f,indent=2)
 print(json.dumps(result,indent=2))
