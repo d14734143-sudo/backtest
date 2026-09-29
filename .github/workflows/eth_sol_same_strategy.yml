@@ -1,0 +1,36 @@
+name: ETH SOL Same Strategy Backtest
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'run_same_strategy.py'
+      - 'filtered_summary.py'
+      - 'btc_full_backtest.py'
+      - '.github/workflows/eth_sol_same_strategy.yml'
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        symbol: [ETHUSDT, SOLUSDT]
+    env:
+      SYMBOL: ${{ matrix.symbol }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run identical full strategy
+        run: python run_same_strategy.py
+      - name: Apply fixed robustness filter
+        run: python filtered_summary.py
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.symbol }}-same-strategy-results
+          path: |
+            ${{ matrix.symbol == 'ETHUSDT' && 'ethusdt_full_result.json' || 'solusdt_full_result.json' }}
+            ${{ matrix.symbol == 'ETHUSDT' && 'ethusdt_filtered_summary.json' || 'solusdt_filtered_summary.json' }}
