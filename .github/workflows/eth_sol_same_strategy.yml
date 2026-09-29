@@ -1,4 +1,4 @@
-name: ETH SOL Same Strategy Backtest
+name: Multi Asset Same Strategy Backtest
 
 on:
   workflow_dispatch:
@@ -6,6 +6,7 @@ on:
     paths:
       - 'run_same_strategy.py'
       - 'filtered_summary.py'
+      - 'precision_search.py'
       - 'btc_full_backtest.py'
       - '.github/workflows/eth_sol_same_strategy.yml'
 
@@ -15,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        symbol: [ETHUSDT, SOLUSDT]
+        symbol: [BTCUSDT, ETHUSDT, SOLUSDT]
     env:
       SYMBOL: ${{ matrix.symbol }}
     steps:
@@ -27,10 +28,13 @@ jobs:
         run: python run_same_strategy.py
       - name: Apply fixed robustness filter
         run: python filtered_summary.py
+      - name: Search precision filters with 2025 train and 2026 validation
+        run: python precision_search.py
       - name: Upload results
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.symbol }}-same-strategy-results
           path: |
-            ${{ matrix.symbol == 'ETHUSDT' && 'ethusdt_full_result.json' || 'solusdt_full_result.json' }}
-            ${{ matrix.symbol == 'ETHUSDT' && 'ethusdt_filtered_summary.json' || 'solusdt_filtered_summary.json' }}
+            ${{ matrix.symbol == 'BTCUSDT' && 'btcusdt_full_result.json' || matrix.symbol == 'ETHUSDT' && 'ethusdt_full_result.json' || 'solusdt_full_result.json' }}
+            ${{ matrix.symbol == 'BTCUSDT' && 'btcusdt_filtered_summary.json' || matrix.symbol == 'ETHUSDT' && 'ethusdt_filtered_summary.json' || 'solusdt_filtered_summary.json' }}
+            ${{ matrix.symbol == 'BTCUSDT' && 'btcusdt_precision_search.json' || matrix.symbol == 'ETHUSDT' && 'ethusdt_precision_search.json' || 'solusdt_precision_search.json' }}
