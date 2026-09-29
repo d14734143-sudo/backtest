@@ -1,0 +1,363 @@
+//@version=6
+indicator("ETH Liquidity Score v1.0 [Forward Test]", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// -----------------------------------------------------------------------------
+// ETHUSDT 15m implementation of the locked ETH Strategy v1.0 research profile.
+// TradingView = structural signal. CoinGlass remains a separate manual filter.
+// The script includes a custom 2R backtest so the visual signal logic and the
+// statistics use the same midpoint-entry / conservative same-bar assumptions.
+// -----------------------------------------------------------------------------
+
+atrLen          = input.int(14, "ATR length", minval=1)
+minStopPct      = input.float(0.75, "Minimum stop distance, %", minval=0.0, step=0.05)
+minScore        = input.int(4, "Minimum quality score", minval=0, maxval=8)
+entrySessionUTC = input.session("0800-1600:1234567", "Entry session (UTC)")
+maxSweepBars    = input.int(24, "Sweep -> CHoCH max bars", minval=1)
+maxRetestBars   = input.int(12, "CHoCH -> retest max bars", minval=1)
+fastRetestBars  = input.int(6, "Fast retest score bars", minval=1)
+outcomeBars     = input.int(96, "Outcome horizon after entry", minval=1)
+showLabels      = input.bool(true, "Show setup / entry labels")
+showBackground  = input.bool(true, "Highlight armed setup")
+enableAlerts    = input.bool(true, "Enable dynamic alerts")
+
+atr = ta.atr(atrLen)
+priorVol20 = ta.sma(volume, 20)[1]
+inEntrySession = not na(time(timeframe.period, entrySessionUTC, "UTC"))
+
+// Last completed 1H context only. [1] is evaluated inside the 1H context and
+// lookahead_on then exposes that already-completed value to the 15m chart.
+f_h1_pivots() =>
+    ph = ta.pivothigh(high, 2, 2)
+    pl = ta.pivotlow(low, 2, 2)
+    var float lastHi = na
+    var float lastLo = na
+    if not na(ph)
+        lastHi := ph
+    if not na(pl)
+        lastLo := pl
+    [lastHi[1], lastLo[1]]
+
+[h1PivotHi, h1PivotLo] = request.security(syminfo.tickerid, "60", f_h1_pivots(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+
+// Last completed 4H close / EMA context only.
+f_h4_context() =>
+    [close[1], ta.ema(close, 20)[1], ta.ema(close, 50)[1]]
+
+[h4Close, h4Ema20, h4Ema50] = request.security(syminfo.tickerid, "240", f_h4_context(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+
+// Confirmed 15m pivots for CHoCH.
+ph15 = ta.pivothigh(high, 2, 2)
+pl15 = ta.pivotlow(low, 2, 2)
+var float lastHi15 = na
+var float lastLo15 = na
+if not na(ph15)
+    lastHi15 := ph15
+if not na(pl15)
+    lastLo15 := pl15
+
+// State: 0 idle, 1 sweep found / waiting CHoCH, 2 setup armed / waiting retest.
+var int state = 0
+var int setupDir = 0              // 1 long, -1 short
+var int sweepBar = na
+var int triggerBar = na
+var float sweepExtreme = na
+var float sweptLevel = na
+var float sweepDepthAtr = na
+var float frozenH1Mid = na
+var float zoneLow = na
+var float zoneHigh = na
+var float entryMid = na
+var bool frozenHtfTrend = false
+var bool frozenDispQuality = false
+var bool frozenVolumeConfirm = false
+var bool frozenZoneQuality = false // Production profile is displacement-body zone (OB_proxy).
+
+// Per-bar event flags.
+bool armedSignal = false
+bool longEntrySignal = false
+bool shortEntrySignal = false
+bool rejectedSignal = false
+
+// -----------------------------------------------------------------------------
+// Custom forward outcome engine. This lets overlapping historical signals finish
+// independently and reports R-based statistics without relying on broker fill
+// assumptions from TradingView's Strategy Tester.
+// -----------------------------------------------------------------------------
+var aDir   = array.new_int()
+var aEntry = array.new_float()
+var aStop  = array.new_float()
+var aTp    = array.new_float()
+var aBar   = array.new_int()
+var aCostR = array.new_float()
+
+var int wins = 0
+var int losses = 0
+var int timeouts = 0
+var float netR = 0.0
+var float grossProfitR = 0.0
+var float grossLossR = 0.0
+var float equityR = 0.0
+var float peakR = 0.0
+var float maxDdR = 0.0
+var int lossStreak = 0
+var int maxLossStreak = 0
+
+// Resolve previously-open test trades. SL is checked before TP on the same bar.
+int ai = array.size(aDir) - 1
+while ai >= 0
+    d = array.get(aDir, ai)
+    e = array.get(aEntry, ai)
+    s = array.get(aStop, ai)
+    t = array.get(aTp, ai)
+    eb = array.get(aBar, ai)
+    costR = array.get(aCostR, ai)
+    age = bar_index - eb
+
+    if age > outcomeBars
+        timeouts += 1
+        array.remove(aDir, ai)
+        array.remove(aEntry, ai)
+        array.remove(aStop, ai)
+        array.remove(aTp, ai)
+        array.remove(aBar, ai)
+        array.remove(aCostR, ai)
+    else if age > 0
+        hitSL = d == 1 ? low <= s : high >= s
+        hitTP = d == 1 ? high >= t : low <= t
+        if hitSL or hitTP
+            pnlR = hitSL ? (-1.0 - costR) : (2.0 - costR)
+            if hitSL
+                losses += 1
+                lossStreak += 1
+                maxLossStreak := math.max(maxLossStreak, lossStreak)
+                grossLossR += -pnlR
+            else
+                wins += 1
+                lossStreak := 0
+                grossProfitR += pnlR
+            netR += pnlR
+            equityR += pnlR
+            peakR := math.max(peakR, equityR)
+            maxDdR := math.max(maxDdR, peakR - equityR)
+            array.remove(aDir, ai)
+            array.remove(aEntry, ai)
+            array.remove(aStop, ai)
+            array.remove(aTp, ai)
+            array.remove(aBar, ai)
+            array.remove(aCostR, ai)
+    ai -= 1
+
+// -----------------------------------------------------------------------------
+// 1) 1H liquidity sweep.
+// -----------------------------------------------------------------------------
+longSweep  = not na(h1PivotLo) and low < h1PivotLo and close > h1PivotLo
+shortSweep = not na(h1PivotHi) and high > h1PivotHi and close < h1PivotHi
+
+if longSweep or shortSweep
+    setupDir := longSweep ? 1 : -1
+    sweepExtreme := longSweep ? low : high
+    sweptLevel := longSweep ? h1PivotLo : h1PivotHi
+    sweepDepthAtr := math.abs(sweepExtreme - sweptLevel) / math.max(atr, syminfo.mintick)
+    frozenH1Mid := not na(h1PivotHi) and not na(h1PivotLo) ? (h1PivotHi + h1PivotLo) / 2.0 : na
+    sweepBar := bar_index
+    triggerBar := na
+    zoneLow := na
+    zoneHigh := na
+    entryMid := na
+    frozenHtfTrend := false
+    frozenDispQuality := false
+    frozenVolumeConfirm := false
+    frozenZoneQuality := false
+    state := 1
+    if showLabels
+        label.new(bar_index, setupDir == 1 ? low : high, setupDir == 1 ? "1H SWEEP\nLONG WATCH" : "1H SWEEP\nSHORT WATCH", style=setupDir == 1 ? label.style_label_up : label.style_label_down, textcolor=color.white, color=setupDir == 1 ? color.new(color.green, 20) : color.new(color.red, 20), size=size.tiny)
+
+// Sweep may wait at most 24 x 15m bars for the displacement CHoCH.
+if state == 1 and bar_index - sweepBar > maxSweepBars
+    state := 0
+
+// -----------------------------------------------------------------------------
+// 2) 15m CHoCH + displacement. First qualifying displacement locks the zone.
+// -----------------------------------------------------------------------------
+body = math.abs(close - open)
+barRange = math.max(high - low, syminfo.mintick)
+bodyAtr = body / math.max(atr, syminfo.mintick)
+bodyRatio = body / barRange
+isDisplacement = bodyAtr >= 1.0 and bodyRatio >= 0.70
+
+longChoch = state == 1 and setupDir == 1 and not na(lastHi15) and close > lastHi15 and close > open and isDisplacement
+shortChoch = state == 1 and setupDir == -1 and not na(lastLo15) and close < lastLo15 and close < open and isDisplacement
+
+if longChoch or shortChoch
+    zoneLow := math.min(open, close)
+    zoneHigh := math.max(open, close)
+    entryMid := (zoneLow + zoneHigh) / 2.0
+    triggerBar := bar_index
+    frozenHtfTrend := setupDir == 1 ? (not na(h4Ema50) and h4Close > h4Ema20 and h4Ema20 > h4Ema50) : (not na(h4Ema50) and h4Close < h4Ema20 and h4Ema20 < h4Ema50)
+    frozenDispQuality := bodyAtr >= 1.50 and bodyRatio >= 0.80
+    frozenVolumeConfirm := not na(priorVol20) and priorVol20 > 0 and volume >= 1.25 * priorVol20
+    frozenZoneQuality := false
+    state := 2
+    armedSignal := true
+    if showLabels
+        label.new(bar_index, setupDir == 1 ? low : high, setupDir == 1 ? "SETUP ARMED\nLONG" : "SETUP ARMED\nSHORT", style=setupDir == 1 ? label.style_label_up : label.style_label_down, textcolor=color.white, color=color.new(color.orange, 0), size=size.small)
+    if enableAlerts
+        alert("ETH v1.0 SETUP ARMED | " + (setupDir == 1 ? "LONG" : "SHORT") + " | midpoint " + str.tostring(entryMid, format.mintick), alert.freq_once_per_bar_close)
+
+// Armed setup expires 12 bars after trigger.
+if state == 2 and bar_index - triggerBar > maxRetestBars
+    state := 0
+
+// Current score components while armed.
+bool pdOk = false
+bool sweepQuality = false
+bool fastRetest = false
+bool sessionQuality = false
+float currentStop = na
+float currentRisk = na
+float currentTp = na
+float currentStopPct = na
+int currentScore = 0
+
+if state == 2
+    pdOk := not na(frozenH1Mid) and (setupDir == 1 ? entryMid <= frozenH1Mid : entryMid >= frozenH1Mid)
+    sweepQuality := sweepDepthAtr >= 0.10
+    fastRetest := bar_index - triggerBar <= fastRetestBars
+    sessionQuality := inEntrySession
+    currentStop := setupDir == 1 ? sweepExtreme - 0.15 * atr : sweepExtreme + 0.15 * atr
+    currentRisk := setupDir == 1 ? entryMid - currentStop : currentStop - entryMid
+    currentTp := setupDir == 1 ? entryMid + 2.0 * currentRisk : entryMid - 2.0 * currentRisk
+    currentStopPct := currentRisk > 0 ? currentRisk / entryMid * 100.0 : na
+    currentScore := (frozenHtfTrend ? 1 : 0) + (pdOk ? 1 : 0) + (sweepQuality ? 1 : 0) + (frozenDispQuality ? 1 : 0) + (frozenZoneQuality ? 1 : 0) + (frozenVolumeConfirm ? 1 : 0) + (fastRetest ? 1 : 0) + (sessionQuality ? 1 : 0)
+
+// -----------------------------------------------------------------------------
+// 3) Retest: midpoint must actually trade. Outside the UTC entry session we do
+// not have a live order, so an out-of-session touch does not consume the setup.
+// -----------------------------------------------------------------------------
+midTouched = state == 2 and bar_index > triggerBar and low <= entryMid and high >= entryMid
+
+if midTouched and inEntrySession
+    validRisk = not na(currentRisk) and currentRisk > 0
+    stopWideEnough = validRisk and currentStopPct >= minStopPct
+    qualityPass = currentScore >= minScore
+
+    if validRisk and stopWideEnough and qualityPass
+        longEntrySignal := setupDir == 1
+        shortEntrySignal := setupDir == -1
+
+        // 10 bps round-trip friction converted to R, matching research reports.
+        costR = 0.001 / math.max(currentRisk / entryMid, 1e-9)
+        hitSLSameBar = setupDir == 1 ? low <= currentStop : high >= currentStop
+        hitTPSameBar = setupDir == 1 ? high >= currentTp : low <= currentTp
+
+        if showLabels
+            label.new(bar_index, entryMid, (setupDir == 1 ? "LONG ENTRY" : "SHORT ENTRY") + "\nScore " + str.tostring(currentScore) + "/8\nSL " + str.tostring(currentStop, format.mintick) + "\nTP " + str.tostring(currentTp, format.mintick), style=setupDir == 1 ? label.style_label_up : label.style_label_down, textcolor=color.white, color=setupDir == 1 ? color.new(color.green, 0) : color.new(color.red, 0), size=size.small)
+
+        if enableAlerts
+            alert("ETH v1.0 ENTRY " + (setupDir == 1 ? "LONG" : "SHORT") + " | score " + str.tostring(currentScore) + "/8 | entry " + str.tostring(entryMid, format.mintick) + " | SL " + str.tostring(currentStop, format.mintick) + " | TP2R " + str.tostring(currentTp, format.mintick) + " | CHECK COINGLASS", alert.freq_once_per_bar_close)
+
+        // Conservative same-bar ordering: SL wins any ambiguity. If only TP was
+        // touched after entry and SL was not, count the bar as a win.
+        if hitSLSameBar or hitTPSameBar
+            pnlR = hitSLSameBar ? (-1.0 - costR) : (2.0 - costR)
+            if hitSLSameBar
+                losses += 1
+                lossStreak += 1
+                maxLossStreak := math.max(maxLossStreak, lossStreak)
+                grossLossR += -pnlR
+            else
+                wins += 1
+                lossStreak := 0
+                grossProfitR += pnlR
+            netR += pnlR
+            equityR += pnlR
+            peakR := math.max(peakR, equityR)
+            maxDdR := math.max(maxDdR, peakR - equityR)
+        else
+            array.push(aDir, setupDir)
+            array.push(aEntry, entryMid)
+            array.push(aStop, currentStop)
+            array.push(aTp, currentTp)
+            array.push(aBar, bar_index)
+            array.push(aCostR, costR)
+        state := 0
+    else
+        rejectedSignal := true
+        if showLabels
+            reason = not validRisk ? "INVALID RISK" : not stopWideEnough ? "STOP < " + str.tostring(minStopPct) + "%" : "SCORE " + str.tostring(currentScore) + "/8"
+            label.new(bar_index, entryMid, "REJECTED\n" + reason, style=label.style_label_left, textcolor=color.white, color=color.new(color.gray, 15), size=size.tiny)
+        state := 0
+
+// -----------------------------------------------------------------------------
+// Visuals.
+// -----------------------------------------------------------------------------
+plot(state == 2 ? zoneLow : na, "Reaction zone low", color=color.new(color.orange, 55), linewidth=1, style=plot.style_linebr)
+plot(state == 2 ? zoneHigh : na, "Reaction zone high", color=color.new(color.orange, 55), linewidth=1, style=plot.style_linebr)
+plot(state == 2 ? entryMid : na, "Entry midpoint", color=color.new(color.yellow, 0), linewidth=2, style=plot.style_linebr)
+plot(state == 2 ? currentStop : na, "Estimated SL", color=color.new(color.red, 0), linewidth=1, style=plot.style_linebr)
+plot(state == 2 ? currentTp : na, "Estimated TP 2R", color=color.new(color.green, 0), linewidth=1, style=plot.style_linebr)
+
+bgcolor(showBackground and state == 2 ? color.new(setupDir == 1 ? color.green : color.red, 92) : na)
+plotshape(longEntrySignal, title="Long entry", style=shape.triangleup, location=location.belowbar, color=color.new(color.green, 0), size=size.small, text="LONG")
+plotshape(shortEntrySignal, title="Short entry", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.small, text="SHORT")
+
+alertcondition(armedSignal, "ETH v1.0 SETUP ARMED", "ETH v1.0 setup armed. Open CoinGlass and prepare confirmation metrics.")
+alertcondition(longEntrySignal or shortEntrySignal, "ETH v1.0 ENTRY", "ETH v1.0 structural entry confirmed. Check CoinGlass before live execution.")
+
+// -----------------------------------------------------------------------------
+// Dashboard.
+// -----------------------------------------------------------------------------
+f_mark(bool v) => v ? "✓" : "✗"
+f_mark_color(bool v) => v ? color.lime : color.red
+
+closedTrades = wins + losses
+winRate = closedTrades > 0 ? 100.0 * wins / closedTrades : na
+profitFactor = grossLossR > 0 ? grossProfitR / grossLossR : na
+statusText = state == 0 ? "IDLE" : state == 1 ? "WAIT CHoCH" : "SETUP ARMED"
+dirText = setupDir == 1 ? "LONG" : setupDir == -1 ? "SHORT" : "—"
+
+var table dash = table.new(position.top_right, 2, 21, border_width=1)
+if barstate.islast
+    table.cell(dash, 0, 0, "ETH v1.0", text_color=color.white, bgcolor=color.new(color.blue, 45))
+    table.cell(dash, 1, 0, "15m / 2R", text_color=color.white, bgcolor=color.new(color.blue, 45))
+
+    table.cell(dash, 0, 1, "Status")
+    table.cell(dash, 1, 1, statusText, text_color=state == 2 ? color.orange : color.white)
+    table.cell(dash, 0, 2, "Direction")
+    table.cell(dash, 1, 2, dirText)
+    table.cell(dash, 0, 3, "TV Score")
+    table.cell(dash, 1, 3, state == 2 ? str.tostring(currentScore) + "/8" : "—", text_color=state == 2 and currentScore >= minScore ? color.lime : color.white)
+    table.cell(dash, 0, 4, "4H trend")
+    table.cell(dash, 1, 4, state == 2 ? f_mark(frozenHtfTrend) : "—", text_color=state == 2 ? f_mark_color(frozenHtfTrend) : color.white)
+    table.cell(dash, 0, 5, "Premium/Discount")
+    table.cell(dash, 1, 5, state == 2 ? f_mark(pdOk) : "—", text_color=state == 2 ? f_mark_color(pdOk) : color.white)
+    table.cell(dash, 0, 6, "Sweep >=0.10 ATR")
+    table.cell(dash, 1, 6, state == 2 ? f_mark(sweepQuality) : "—", text_color=state == 2 ? f_mark_color(sweepQuality) : color.white)
+    table.cell(dash, 0, 7, "Displacement")
+    table.cell(dash, 1, 7, state == 2 ? f_mark(frozenDispQuality) : "—", text_color=state == 2 ? f_mark_color(frozenDispQuality) : color.white)
+    table.cell(dash, 0, 8, "FVG bonus")
+    table.cell(dash, 1, 8, state == 2 ? "0 (OB profile)" : "—", text_color=color.silver)
+    table.cell(dash, 0, 9, "Volume")
+    table.cell(dash, 1, 9, state == 2 ? f_mark(frozenVolumeConfirm) : "—", text_color=state == 2 ? f_mark_color(frozenVolumeConfirm) : color.white)
+    table.cell(dash, 0, 10, "Fast retest")
+    table.cell(dash, 1, 10, state == 2 ? f_mark(fastRetest) : "—", text_color=state == 2 ? f_mark_color(fastRetest) : color.white)
+    table.cell(dash, 0, 11, "08-16 UTC")
+    table.cell(dash, 1, 11, state == 2 ? f_mark(sessionQuality) : "—", text_color=state == 2 ? f_mark_color(sessionQuality) : color.white)
+    table.cell(dash, 0, 12, "Entry")
+    table.cell(dash, 1, 12, state == 2 ? str.tostring(entryMid, format.mintick) : "—")
+    table.cell(dash, 0, 13, "SL")
+    table.cell(dash, 1, 13, state == 2 and not na(currentStop) ? str.tostring(currentStop, format.mintick) : "—")
+    table.cell(dash, 0, 14, "TP 2R")
+    table.cell(dash, 1, 14, state == 2 and not na(currentTp) ? str.tostring(currentTp, format.mintick) : "—")
+    table.cell(dash, 0, 15, "Closed")
+    table.cell(dash, 1, 15, str.tostring(closedTrades))
+    table.cell(dash, 0, 16, "Win rate")
+    table.cell(dash, 1, 16, closedTrades > 0 ? str.tostring(winRate, "#.##") + "%" : "—")
+    table.cell(dash, 0, 17, "Net R (10bps)")
+    table.cell(dash, 1, 17, str.tostring(netR, "#.###"))
+    table.cell(dash, 0, 18, "Profit factor")
+    table.cell(dash, 1, 18, not na(profitFactor) ? str.tostring(profitFactor, "#.###") : "—")
+    table.cell(dash, 0, 19, "Max DD, R")
+    table.cell(dash, 1, 19, str.tostring(maxDdR, "#.###"))
+    table.cell(dash, 0, 20, "Timeouts")
+    table.cell(dash, 1, 20, str.tostring(timeouts))
