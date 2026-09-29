@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'btc_full_backtest.py'
+      - 'btc_robustness.py'
       - '.github/workflows/btc_full.yml'
   workflow_dispatch:
 
@@ -24,8 +25,13 @@ jobs:
       - name: Run full BTC backtest
         run: python btc_full_backtest.py
 
-      - name: Upload full BTC result
+      - name: Run robustness analysis
+        run: python btc_robustness.py
+
+      - name: Upload BTC results
         uses: actions/upload-artifact@v4
         with:
           name: btc-full-result
-          path: btc_full_result.json
+          path: |
+            btc_full_result.json
+            btc_robustness_result.json
