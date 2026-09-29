@@ -1,0 +1,31 @@
+name: BTC Full Backtest
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'btc_full_backtest.py'
+      - '.github/workflows/btc_full.yml'
+  workflow_dispatch:
+
+jobs:
+  run-btc-full:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run full BTC backtest
+        run: python btc_full_backtest.py
+
+      - name: Upload full BTC result
+        uses: actions/upload-artifact@v4
+        with:
+          name: btc-full-result
+          path: btc_full_result.json
