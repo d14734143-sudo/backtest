@@ -11,7 +11,7 @@ indicator("ETH Liquidity Score v1.0 [Forward Test]", overlay=true, max_labels_co
 atrLen          = input.int(14, "ATR length", minval=1)
 minStopPct      = input.float(0.75, "Minimum stop distance, %", minval=0.0, step=0.05)
 minScore        = input.int(4, "Minimum quality score", minval=0, maxval=8)
-entrySessionUTC = input.session("0800-1600:1234567", "Entry session (UTC)")
+entrySessionUTC = input.session("0800-1600", "Entry session (UTC)")
 maxSweepBars    = input.int(24, "Sweep -> CHoCH max bars", minval=1)
 maxRetestBars   = input.int(12, "CHoCH -> retest max bars", minval=1)
 fastRetestBars  = input.int(6, "Fast retest score bars", minval=1)
