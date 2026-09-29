@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - 'v02_scoring_backtest.py'
+      - 'v03_final_selector.py'
       - '.github/workflows/v02_scoring.yml'
 
 jobs:
@@ -23,8 +24,12 @@ jobs:
           python-version: '3.12'
       - name: Run lookahead-safe v0.2 scoring backtest
         run: python v02_scoring_backtest.py
-      - name: Upload v0.2 result
+      - name: Select robust v0.3 final rules
+        run: python v03_final_selector.py
+      - name: Upload scoring and final selection
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.symbol }}-v02-scoring
-          path: ${{ matrix.symbol == 'BTCUSDT' && 'btcusdt_v02_scoring_result.json' || matrix.symbol == 'ETHUSDT' && 'ethusdt_v02_scoring_result.json' || 'solusdt_v02_scoring_result.json' }}
+          name: ${{ matrix.symbol }}-v03-final
+          path: |
+            ${{ matrix.symbol == 'BTCUSDT' && 'btcusdt_v02_scoring_result.json' || matrix.symbol == 'ETHUSDT' && 'ethusdt_v02_scoring_result.json' || 'solusdt_v02_scoring_result.json' }}
+            ${{ matrix.symbol == 'BTCUSDT' && 'btcusdt_v03_final_selection.json' || matrix.symbol == 'ETHUSDT' && 'ethusdt_v03_final_selection.json' || 'solusdt_v03_final_selection.json' }}
